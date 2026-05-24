@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.food_listing import FoodListing, FoodListingStatus
 from app.models.user import UserRole, User
+from app.repositories.claim_repository import ClaimRepository
 from app.repositories.food_listing_repository import FoodListingRepository
 from app.schemas.food_listing import (
     FoodListingCreate,
@@ -22,6 +23,7 @@ class FoodListingService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.repo = FoodListingRepository(session)
+        self.claim_repo = ClaimRepository(session)
 
     async def create(self, payload: FoodListingCreate, current_user: User) -> FoodListingRead:
         if current_user is None or current_user.role != UserRole.donor:
@@ -56,6 +58,14 @@ class FoodListingService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing no encontrado")
         if listing.donor_id != current_user.id and current_user.role != UserRole.admin:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No autorizado")
+
+        existing_claim = await self.claim_repo.get_by_listing_id(listing_id)
+        if existing_claim is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="No se puede eliminar un listing con claims asociados",
+            )
+
         await self.repo.delete(listing)
         await self.session.commit()
 

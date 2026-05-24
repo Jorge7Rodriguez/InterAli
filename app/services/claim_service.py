@@ -35,8 +35,8 @@ class ClaimService:
         if listing.expiration_date is not None and listing.expiration_date <= now:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se puede reclamar un listing expirado")
 
-        existing_claim = await self.claim_repo.get_by_listing_id(listing_id)
-        if existing_claim is not None:
+        existing_open_claim = await self.claim_repo.get_by_listing_id(listing_id, statuses={ClaimStatus.pending})
+        if existing_open_claim is not None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Este listing ya fue reclamado")
 
         claim = Claim(

@@ -14,6 +14,7 @@ async def startup_event(app: FastAPI) -> None:
     app.state.settings = settings
     app.state.engine = engine
     async with engine.begin() as connection:
+        await connection.exec_driver_sql("ALTER TABLE claims DROP CONSTRAINT IF EXISTS uq_claim_food_listing_id")
         await connection.run_sync(Base.metadata.create_all)
 
 

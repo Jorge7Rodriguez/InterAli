@@ -25,8 +25,14 @@ class ClaimRepository:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def get_by_listing_id(self, listing_id: uuid.UUID) -> Claim | None:
+    async def get_by_listing_id(
+        self,
+        listing_id: uuid.UUID,
+        statuses: set[str] | set[ClaimStatus] | None = None,
+    ) -> Claim | None:
         stmt = select(Claim).options(selectinload(Claim.food_listing)).where(Claim.food_listing_id == listing_id)
+        if statuses is not None:
+            stmt = stmt.where(Claim.status.in_([status.value if hasattr(status, "value") else status for status in statuses]))
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
