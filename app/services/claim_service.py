@@ -52,9 +52,21 @@ class ClaimService:
         created_claim.food_listing = listing
         return ClaimRead.model_validate(created_claim)
 
-    async def list_my_claims(self, current_user: User) -> list[ClaimRead]:
-        claims = await self.claim_repo.list_by_receiver(current_user.id)
+    async def list_my_claims(self, current_user: User, status_filter: ClaimStatus | None = None) -> list[ClaimRead]:
+        claims = await self.claim_repo.list_by_receiver(current_user.id, status=status_filter.value if status_filter else None)
         return [ClaimRead.model_validate(claim) for claim in claims]
+
+    async def list_donor_claims(self, current_user: User, status_filter: ClaimStatus | None = None) -> list[ClaimRead]:
+        status_value = status_filter.value if status_filter else None
+        if current_user.role == UserRole.donor:
+            claims = await self.claim_repo.list_by_donor(current_user.id, status=status_value)
+            return [ClaimRead.model_validate(claim) for claim in claims]
+
+        if current_user.role == UserRole.admin:
+            claims = await self.claim_repo.list_all(status=status_value)
+            return [ClaimRead.model_validate(claim) for claim in claims]
+
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo donors o admin pueden ver estos claims")
 
     async def update_status(self, claim_id: uuid.UUID, status_value: ClaimStatus, current_user: User) -> ClaimRead:
         claim = await self.claim_repo.get_by_id(claim_id)

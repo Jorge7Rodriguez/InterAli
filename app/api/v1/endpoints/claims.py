@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -30,9 +30,20 @@ async def claim_food_listing(
 async def list_my_claims(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    status: ClaimStatus | None = Query(default=None),
 ) -> list[ClaimRead]:
     service = ClaimService(db)
-    return await service.list_my_claims(current_user)
+    return await service.list_my_claims(current_user, status_filter=status)
+
+
+@router.get("/claims/donor", response_model=list[ClaimRead])
+async def list_donor_claims(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    status: ClaimStatus | None = Query(default=None),
+) -> list[ClaimRead]:
+    service = ClaimService(db)
+    return await service.list_donor_claims(current_user, status_filter=status)
 
 
 @router.patch("/claims/{claim_id}/status", response_model=ClaimRead)
