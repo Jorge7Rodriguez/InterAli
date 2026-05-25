@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Iterable
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,14 +12,39 @@ from app.models.food_listing import FoodListingStatus
 from app.models.user import User, UserRole
 from app.repositories.claim_repository import ClaimRepository
 from app.repositories.food_listing_repository import FoodListingRepository
+from app.repositories.user_repository import UserRepository
 from app.schemas.claim import ClaimRead
 
 
 class ClaimService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        claim_repo: ClaimRepository | None = None,
+        listing_repo: FoodListingRepository | None = None,
+        user_repo: UserRepository | None = None,
+    ) -> None:
         self.session = session
-        self.claim_repo = ClaimRepository(session)
-        self.listing_repo = FoodListingRepository(session)
+        self.claim_repo = claim_repo or ClaimRepository(session)
+        self.listing_repo = listing_repo or FoodListingRepository(session)
+        self.user_repo = user_repo or UserRepository(session)
+
+    async def _pick_volunteer(self, exclude_ids: Iterable[uuid.UUID] | None = None) -> User | None:
+        excluded = set(exclude_ids or [])
+        volunteers = await self.user_repo.list_by_role(UserRole.volunteer)
+        candidates: list[tuple[int, User]] = []
+
+        for volunteer in volunteers:
+            if not volunteer.is_active or volunteer.id in excluded:
+                continue
+            active_assignments = await self.claim_repo.count_active_by_volunteer(volunteer.id)
+            candidates.append((active_assignments, volunteer))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (item[0], str(item[1].id)))
+        return candidates[0][1]
 
     async def create_claim(self, listing_id: uuid.UUID, current_user: User) -> ClaimRead:
         if current_user.role != UserRole.receiver:
@@ -62,19 +88,20 @@ class ClaimService:
             claims = await self.claim_repo.list_by_donor(current_user.id, status=status_value)
             return [ClaimRead.model_validate(claim) for claim in claims]
 
+        if current_user.role == UserRole.volunteer:
+            claims = await self.claim_repo.list_by_volunteer(current_user.id, status=status_value)
+            return [ClaimRead.model_validate(claim) for claim in claims]
+
         if current_user.role == UserRole.admin:
             claims = await self.claim_repo.list_all(status=status_value)
             return [ClaimRead.model_validate(claim) for claim in claims]
 
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo donors o admin pueden ver estos claims")
 
-    async def update_status(self, claim_id: uuid.UUID, status_value: ClaimStatus, current_user: User) -> ClaimRead:
+    async def update_status(self, claim_id: uuid.UUID, status_value: ClaimStatus, current_user: User, volunteer_id: uuid.UUID | None = None) -> ClaimRead:
         claim = await self.claim_repo.get_by_id(claim_id)
         if claim is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim no encontrado")
-
-        if claim.status != ClaimStatus.pending:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El reclamo ya fue resuelto")
 
         listing = claim.food_listing
         if listing is None:
@@ -86,14 +113,72 @@ class ClaimService:
         if current_user.role not in {UserRole.donor, UserRole.admin} or (
             current_user.role == UserRole.donor and listing.donor_id != current_user.id
         ):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No autorizado")
+            if current_user.role != UserRole.volunteer:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No autorizado")
 
-        claim.status = status_value
+        now = datetime.now(timezone.utc)
 
-        if status_value == ClaimStatus.approved:
-            listing.status = FoodListingStatus.claimed.value
-        elif status_value in {ClaimStatus.rejected, ClaimStatus.cancelled}:
-            listing.status = FoodListingStatus.active.value
+        if current_user.role == UserRole.volunteer:
+            if claim.volunteer_id != current_user.id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo el voluntario asignado puede actualizar la recogida")
+
+            if status_value == ClaimStatus.approved:
+                if claim.volunteer_accepted_at is None:
+                    claim.volunteer_accepted_at = now
+            elif status_value == ClaimStatus.picked_up:
+                if claim.volunteer_accepted_at is None:
+                    claim.volunteer_accepted_at = now
+                claim.pickup_confirmed_at = now
+            elif status_value == ClaimStatus.delivered:
+                if claim.volunteer_accepted_at is None:
+                    claim.volunteer_accepted_at = now
+                claim.delivered_confirmed_at = now
+            elif status_value == ClaimStatus.cancelled:
+                next_volunteer = await self._pick_volunteer(exclude_ids={current_user.id})
+                if next_volunteer is None:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No hay otro voluntario disponible")
+                claim.volunteer_id = next_volunteer.id
+                claim.volunteer_accepted_at = None
+                claim.pickup_confirmed_at = None
+                claim.delivered_confirmed_at = None
+                claim.status = ClaimStatus.approved
+                updated_claim = await self.claim_repo.update(claim)
+                await self.listing_repo.update(listing)
+                await self.session.commit()
+                updated_claim.food_listing = listing
+                return ClaimRead.model_validate(updated_claim)
+            else:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El voluntario solo puede aceptar, confirmar recogida o entrega")
+
+            if status_value in {ClaimStatus.approved, ClaimStatus.picked_up, ClaimStatus.delivered}:
+                claim.status = status_value
+        else:
+            if status_value == ClaimStatus.approved:
+                chosen_volunteer = await self._pick_volunteer()
+                if chosen_volunteer is None:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No hay voluntarios disponibles")
+                claim.status = status_value
+                claim.volunteer_id = chosen_volunteer.id
+                claim.volunteer_accepted_at = None
+                claim.pickup_confirmed_at = None
+                claim.delivered_confirmed_at = None
+                listing.status = FoodListingStatus.claimed.value
+            elif status_value in {ClaimStatus.rejected, ClaimStatus.cancelled}:
+                if claim.status != ClaimStatus.pending:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El reclamo ya fue resuelto")
+                claim.status = status_value
+                listing.status = FoodListingStatus.active.value
+            elif status_value == ClaimStatus.picked_up:
+                if claim.volunteer_id is None:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Debes asignar un voluntario antes de confirmar recogida")
+                claim.status = status_value
+                claim.pickup_confirmed_at = now
+            elif status_value == ClaimStatus.delivered:
+                claim.status = status_value
+                claim.delivered_confirmed_at = now
+                listing.status = FoodListingStatus.active.value
+            else:
+                claim.status = status_value
 
         updated_claim = await self.claim_repo.update(claim)
         await self.listing_repo.update(listing)

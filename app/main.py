@@ -14,7 +14,12 @@ async def startup_event(app: FastAPI) -> None:
     app.state.settings = settings
     app.state.engine = engine
     async with engine.begin() as connection:
-        await connection.exec_driver_sql("ALTER TABLE claims DROP CONSTRAINT IF EXISTS uq_claim_food_listing_id")
+        await connection.exec_driver_sql("ALTER TABLE users ALTER COLUMN role TYPE VARCHAR(16)")
+        await connection.exec_driver_sql("ALTER TABLE claims ALTER COLUMN status TYPE VARCHAR(16)")
+        await connection.exec_driver_sql("ALTER TABLE claims ADD COLUMN IF NOT EXISTS volunteer_id UUID NULL")
+        await connection.exec_driver_sql("ALTER TABLE claims ADD COLUMN IF NOT EXISTS volunteer_accepted_at TIMESTAMPTZ NULL")
+        await connection.exec_driver_sql("ALTER TABLE claims ADD COLUMN IF NOT EXISTS pickup_confirmed_at TIMESTAMPTZ NULL")
+        await connection.exec_driver_sql("ALTER TABLE claims ADD COLUMN IF NOT EXISTS delivered_confirmed_at TIMESTAMPTZ NULL")
         await connection.run_sync(Base.metadata.create_all)
 
 

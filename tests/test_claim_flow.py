@@ -80,6 +80,24 @@ class InMemoryClaimRepository:
         self.claims[claim.id] = claim
         return claim
 
+    async def count_active_by_volunteer(self, volunteer_id: uuid.UUID) -> int:
+        return sum(
+            1
+            for claim in self.claims.values()
+            if claim.volunteer_id == volunteer_id and claim.status in {ClaimStatus.approved, ClaimStatus.picked_up}
+        )
+
+
+class InMemoryUserRepository:
+    def __init__(self) -> None:
+        self.users: dict[uuid.UUID, User] = {}
+
+    def add(self, user: User) -> None:
+        self.users[user.id] = user
+
+    async def list_by_role(self, role: UserRole) -> list[User]:
+        return [user for user in self.users.values() if user.role == role and user.is_active]
+
 
 def make_user(role: UserRole, email: str) -> User:
     now = datetime.now(timezone.utc)
@@ -100,19 +118,26 @@ class ClaimFlowTest(unittest.IsolatedAsyncioTestCase):
         self.session = DummySession()
         self.listing_repo = InMemoryFoodListingRepository()
         self.claim_repo = InMemoryClaimRepository()
+        self.user_repo = InMemoryUserRepository()
 
         self.food_listing_service = FoodListingService(self.session)
         self.food_listing_service.repo = self.listing_repo
         self.food_listing_service.claim_repo = self.claim_repo
 
-        self.claim_service = ClaimService(self.session)
-        self.claim_service.listing_repo = self.listing_repo
-        self.claim_service.claim_repo = self.claim_repo
+        self.claim_service = ClaimService(
+            self.session,
+            claim_repo=self.claim_repo,
+            listing_repo=self.listing_repo,
+            user_repo=self.user_repo,
+        )
 
         self.donor = make_user(UserRole.donor, "donor1@example.com")
         self.second_donor = make_user(UserRole.donor, "donor2@example.com")
         self.receiver_one = make_user(UserRole.receiver, "receiver1@example.com")
         self.receiver_two = make_user(UserRole.receiver, "receiver2@example.com")
+
+        for user in [self.donor, self.second_donor, self.receiver_one, self.receiver_two]:
+            self.user_repo.add(user)
 
     async def test_donor_rejects_and_listing_can_be_reclaimed_by_another_receiver(self) -> None:
         listing = await self.food_listing_service.create(
@@ -166,6 +191,68 @@ class ClaimFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(context.exception.status_code, 409)
         self.assertEqual(context.exception.detail, "No se puede eliminar un listing con claims asociados")
+
+    async def test_volunteer_can_confirm_pickup_and_delivery_after_assignment(self) -> None:
+        volunteer = make_user(UserRole.volunteer, "volunteer@example.com")
+        self.user_repo.add(volunteer)
+
+        listing = await self.food_listing_service.create(
+            FoodListingCreate(
+                title="Arroz",
+                description="Lote listo para retiro",
+                quantity=5,
+                category="granos",
+                pickup_address="Cra 10",
+            ),
+            self.donor,
+        )
+
+        claim = await self.claim_service.create_claim(listing.id, self.receiver_one)
+        assigned_claim = await self.claim_service.update_status(claim.id, ClaimStatus.approved, self.donor, volunteer_id=volunteer.id)
+
+        self.assertEqual(assigned_claim.status, ClaimStatus.approved)
+        self.assertEqual(assigned_claim.volunteer_id, volunteer.id)
+
+        accepted_claim = await self.claim_service.update_status(claim.id, ClaimStatus.approved, volunteer)
+        self.assertEqual(accepted_claim.status, ClaimStatus.approved)
+        self.assertIsNotNone(accepted_claim.volunteer_accepted_at)
+
+        picked_up_claim = await self.claim_service.update_status(claim.id, ClaimStatus.picked_up, volunteer)
+        self.assertEqual(picked_up_claim.status, ClaimStatus.picked_up)
+        self.assertIsNotNone(picked_up_claim.pickup_confirmed_at)
+
+        delivered_claim = await self.claim_service.update_status(claim.id, ClaimStatus.delivered, volunteer)
+        self.assertEqual(delivered_claim.status, ClaimStatus.delivered)
+        self.assertIsNotNone(delivered_claim.delivered_confirmed_at)
+
+    async def test_rejected_volunteer_assignment_is_reassigned_to_another_volunteer(self) -> None:
+        volunteer_one = make_user(UserRole.volunteer, "volunteer1@example.com")
+        volunteer_two = make_user(UserRole.volunteer, "volunteer2@example.com")
+        self.user_repo.add(volunteer_one)
+        self.user_repo.add(volunteer_two)
+
+        listing = await self.food_listing_service.create(
+            FoodListingCreate(
+                title="Frutas",
+                description="Lote listo para recoger",
+                quantity=4,
+                category="frutas",
+                pickup_address="Cra 20",
+            ),
+            self.donor,
+        )
+
+        claim = await self.claim_service.create_claim(listing.id, self.receiver_one)
+        assigned_claim = await self.claim_service.update_status(claim.id, ClaimStatus.approved, self.donor)
+
+        original_volunteer_id = assigned_claim.volunteer_id
+        self.assertIn(original_volunteer_id, {volunteer_one.id, volunteer_two.id})
+
+        rejecting_volunteer = volunteer_one if original_volunteer_id == volunteer_one.id else volunteer_two
+        rejected_by_first = await self.claim_service.update_status(claim.id, ClaimStatus.cancelled, rejecting_volunteer)
+        self.assertEqual(rejected_by_first.status, ClaimStatus.approved)
+        self.assertNotEqual(rejected_by_first.volunteer_id, original_volunteer_id)
+        self.assertIsNone(rejected_by_first.volunteer_accepted_at)
 
 
 if __name__ == "__main__":

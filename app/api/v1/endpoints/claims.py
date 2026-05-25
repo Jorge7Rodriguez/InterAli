@@ -46,6 +46,16 @@ async def list_donor_claims(
     return await service.list_donor_claims(current_user, status_filter=status)
 
 
+@router.get("/claims/volunteer", response_model=list[ClaimRead])
+async def list_volunteer_claims(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    status: ClaimStatus | None = Query(default=None),
+) -> list[ClaimRead]:
+    service = ClaimService(db)
+    return await service.list_donor_claims(current_user, status_filter=status)
+
+
 @router.patch("/claims/{claim_id}/status", response_model=ClaimRead)
 async def update_claim_status(
     claim_id: uuid.UUID,
@@ -54,4 +64,4 @@ async def update_claim_status(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ClaimRead:
     service = ClaimService(db)
-    return await service.update_status(claim_id, payload.status, current_user)
+    return await service.update_status(claim_id, payload.status, current_user, volunteer_id=payload.volunteer_id)

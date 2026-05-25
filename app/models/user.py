@@ -14,6 +14,7 @@ from app.db.base import Base
 class UserRole(str, Enum):
     donor = "donor"
     receiver = "receiver"
+    volunteer = "volunteer"
     admin = "admin"
 
 
