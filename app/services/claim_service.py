@@ -73,6 +73,9 @@ class ClaimService:
         if claim is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim no encontrado")
 
+        if claim.status != ClaimStatus.pending:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El reclamo ya fue resuelto")
+
         listing = claim.food_listing
         if listing is None:
             listing = await self.listing_repo.get_by_id(claim.food_listing_id)
